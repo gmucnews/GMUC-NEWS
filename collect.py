@@ -13,6 +13,7 @@
 import hashlib
 import html
 import json
+import math
 import os
 import re
 import smtplib
@@ -296,8 +297,10 @@ def parse_daum_html(page_html, now):
 
 
 def fetch_daum(query, cfg):
-    out, now = [], now_kst()
-    for page in range(1, int(cfg.get("daum_pages", 2)) + 1):
+    """검색 결과를 쪽수대로 읽습니다. 같은 결과가 반복되면 그 자리에서 멈춥니다."""
+    out, seen, now = [], set(), now_kst()
+    pages = int(cfg.get("daum_pages", 4))
+    for page in range(1, pages + 1):
         r = requests.get(
             "https://search.daum.net/search",
             params={"w": "news", "q": query, "sort": "recency", "p": page, "DA": "STC"},
@@ -307,10 +310,96 @@ def fetch_daum(query, cfg):
         if r.status_code != 200:
             raise RuntimeError(f"다음 검색 {r.status_code}")
         got = parse_daum_html(r.text, now)
-        if not got and page == 1:
-            raise RuntimeError("다음 검색 결과를 읽지 못했습니다 (페이지 구조 변경 가능성)")
-        out.extend(got)
+        if not got:
+            if page == 1:
+                raise RuntimeError("다음 검색 결과를 읽지 못했습니다 (페이지 구조 변경 가능성)")
+            log(f"    {query} {page}쪽: 결과 없음, 중단")
+            break
+        fresh = [g for g in got if norm_url(g["url"]) not in seen]
+        seen.update(norm_url(g["url"]) for g in got)
+        oldest = min(g["published"] for g in got)
+        log(f"    {query} {page}쪽: {len(got)}건(새 {len(fresh)}건), 가장 오래된 기사 {oldest:%m/%d %H:%M}")
+        out.extend(fresh)
+        if not fresh:
+            log(f"    {query}: 앞 쪽과 같은 결과가 나와 중단 (더 뒤로 갈 수 없음)")
+            break
         time.sleep(1)
+    return out
+
+
+# ---------- 수집: 직접 등록한 기사 ----------
+# 검색에 잡히지 않는 기사를 config.json 의 manual_urls 에 주소로 넣으면 여기서 읽어옵니다.
+
+META_TITLE = [("meta", {"property": "og:title"}), ("meta", {"name": "title"}),
+              ("meta", {"property": "twitter:title"})]
+META_DESC = [("meta", {"property": "og:description"}), ("meta", {"name": "description"})]
+META_PRESS = [("meta", {"property": "og:site_name"}), ("meta", {"name": "publisher"})]
+META_DATE = [("meta", {"property": "article:published_time"}),
+             ("meta", {"property": "og:article:published_time"}),
+             ("meta", {"itemprop": "datePublished"}), ("meta", {"name": "article:published_time"}),
+             ("meta", {"name": "date"}), ("meta", {"property": "article:modified_time"})]
+DATE_TEXT_RE = re.compile(r"(20\d{2})[-./년\s]+(\d{1,2})[-./월\s]+(\d{1,2})"
+                          r"(?:[일\s]*[^0-9]{0,6}(\d{1,2})[:시\s]+(\d{1,2}))?")
+
+
+def meta_of(soup, candidates):
+    for tag, attrs in candidates:
+        el = soup.find(tag, attrs=attrs)
+        if el and el.get("content", "").strip():
+            return clean_text(el["content"])
+    return ""
+
+
+def parse_article_date(soup, raw):
+    for text in (meta_of(soup, META_DATE), raw[:4000]):
+        m = DATE_TEXT_RE.search(text or "")
+        if not m:
+            continue
+        y, mo, d = int(m.group(1)), int(m.group(2)), int(m.group(3))
+        h, mi = int(m.group(4) or 9), int(m.group(5) or 0)
+        try:
+            dt = datetime(y, mo, d, min(h, 23), min(mi, 59), tzinfo=KST)
+        except ValueError:
+            continue
+        if dt <= now_kst() + timedelta(hours=1):
+            return dt, True
+    return now_kst(), False
+
+
+def fetch_manual(cfg, press_map):
+    entries = cfg.get("manual_urls") or []
+    out = []
+    for entry in entries:
+        item = {"url": entry} if isinstance(entry, str) else dict(entry)
+        url = (item.get("url") or "").strip()
+        if not url:
+            continue
+        try:
+            r = requests.get(url, headers={"User-Agent": UA, "Accept-Language": "ko-KR,ko;q=0.9"},
+                             timeout=20)
+            r.raise_for_status()
+            r.encoding = r.apparent_encoding or r.encoding
+            soup = BeautifulSoup(r.text, "html.parser")
+            title = item.get("title") or meta_of(soup, META_TITLE) or clean_text(
+                soup.title.get_text() if soup.title else "")
+            if not title:
+                raise RuntimeError("제목을 찾지 못했습니다")
+            pub, exact = parse_article_date(soup, r.text)
+            out.append({
+                "title": title,
+                "url": url,
+                "portal_url": "",
+                "desc": item.get("desc") or meta_of(soup, META_DESC),
+                "published": pub,
+                "time_exact": exact,
+                "press": item.get("press") or press_from_url(url, press_map) or meta_of(soup, META_PRESS),
+                "source": "manual",
+                "keywords": item.get("keywords") or [],
+            })
+            log(f"직접 등록: {title[:40]}")
+        except Exception as e:
+            log(f"직접 등록 실패 ({url}): {str(e)[:120]}")
+            out.append({"error": f"{url} — {str(e)[:100]}"})
     return out
 
 
@@ -348,21 +437,59 @@ def judge_sentiment(title, desc, words):
     return "neutral"
 
 
-def bigrams(s):
-    s = re.sub(r"[^0-9a-z가-힣]", "", s.lower())
-    return {s[i:i + 2] for i in range(len(s) - 1)}
+def title_tokens(title, strip_terms):
+    """제목에서 비교용 조각을 뽑습니다. 한글은 두 글자씩, 숫자·영문은 단어 통째로."""
+    t = strip_lead_tags(title)
+    for term in strip_terms:
+        t = t.replace(term, " ")
+    t = re.sub(r"[^0-9A-Za-z가-힣]+", " ", t).lower()
+    out = set()
+    for w in t.split():
+        if len(w) < 2:
+            continue
+        if re.fullmatch(r"[0-9a-z]+", w):
+            out.add(w)
+        for i in range(len(w) - 1):
+            out.add(w[i:i + 2])
+    return out
 
 
-def assign_clusters(records, strip_terms, threshold=0.55, window_hours=72):
-    """같은 보도자료를 받아 쓴 기사끼리 묶음. cluster = 가장 먼저 나온 기사의 id"""
+def assign_clusters(records, strip_terms, threshold=0.3, window_hours=72):
+    """같은 사안을 다룬 기사끼리 묶습니다.
+
+    흔한 말(구미, 시민, 추진…)은 가볍게, 그 기사에만 나오는 말(교촌, 양자, IonQ…)은
+    무겁게 쳐서 제목이 얼마나 같은 사안을 가리키는지 봅니다.
+    cluster 값은 그 묶음에서 가장 먼저 나온 기사의 id 입니다.
+    """
     recs = sorted(records, key=lambda r: r["published"])
-    grams = []
+    n = len(recs)
     for r in recs:
-        t = strip_lead_tags(r["title"])
-        for term in strip_terms:
-            t = t.replace(term, " ")
-        grams.append(bigrams(t))
-    parent = list(range(len(recs)))
+        r["cluster"] = r["id"]
+    if n < 2:
+        return
+
+    toks = [title_tokens(r["title"], strip_terms) for r in recs]
+    df = {}
+    for t in toks:
+        for g in t:
+            df[g] = df.get(g, 0) + 1
+    idf = {g: math.log(n / c) + 0.2 for g, c in df.items()}
+
+    vecs = []
+    for t in toks:
+        v = {g: idf[g] for g in t}
+        norm = math.sqrt(sum(x * x for x in v.values())) or 1.0
+        vecs.append({g: x / norm for g, x in v.items()})
+
+    # 흔하지 않은 조각만 색인해서 비교 후보를 추립니다 (전부 대조하면 느려집니다)
+    rare_cap = max(30, int(n * 0.1))
+    index = {}
+    for i, t in enumerate(toks):
+        for g in t:
+            if df[g] <= rare_cap:
+                index.setdefault(g, []).append(i)
+
+    parent = list(range(n))
 
     def find(i):
         while parent[i] != i:
@@ -371,22 +498,27 @@ def assign_clusters(records, strip_terms, threshold=0.55, window_hours=72):
         return i
 
     window = timedelta(hours=window_hours)
-    lo = 0
-    for i in range(len(recs)):
-        while recs[i]["published"] - recs[lo]["published"] > window:
-            lo += 1
-        gi = grams[i]
-        if len(gi) < 6:
+    for i in range(n):
+        vi = vecs[i]
+        if len(vi) < 3:
             continue
-        for j in range(lo, i):
-            gj = grams[j]
-            if len(gj) < 6:
+        cands = set()
+        for g in toks[i]:
+            if df[g] <= rare_cap:
+                cands.update(j for j in index.get(g, ()) if j < i)
+        for j in cands:
+            if recs[i]["published"] - recs[j]["published"] > window:
                 continue
-            inter = len(gi & gj)
-            if inter and 2 * inter / (len(gi) + len(gj)) >= threshold:
+            vj = vecs[j]
+            if len(vj) < 3:
+                continue
+            a, b = (vi, vj) if len(vi) <= len(vj) else (vj, vi)
+            sim = sum(x * b[g] for g, x in a.items() if g in b)
+            if sim >= threshold:
                 ri, rj = find(i), find(j)
                 if ri != rj:
                     parent[max(ri, rj)] = min(ri, rj)
+
     for i, r in enumerate(recs):
         r["cluster"] = recs[find(i)]["id"]
 
@@ -606,12 +738,32 @@ def main():
             status.setdefault("warnings", []).append(msg)
             log("경고:", msg)
 
+    # 직접 등록한 기사
+    manual_errors = []
+    for a in fetch_manual(cfg, press_map):
+        if "error" in a:
+            manual_errors.append(a["error"])
+            continue
+        if a["published"] < cutoff:
+            continue
+        forced = [k for k in a.pop("keywords", []) if k in kw_names]
+        hit = forced or [k["name"] for k in cfg["keywords"] if is_relevant(a, k)]
+        if not hit:
+            manual_errors.append(f"{a['title'][:30]} — 어느 키워드에도 맞지 않습니다. manual_urls 항목에 keywords 를 지정하세요")
+            continue
+        for name in hit:
+            rec, is_new = merge(db, url_idx, title_idx, a, name)
+            if is_new:
+                new_ids.add(rec["id"])
+    if manual_errors:
+        status.setdefault("warnings", []).extend("직접 등록: " + m for m in manual_errors)
+
     records = list(db.values())
     words = cfg.get("sentiment", {})
     for r in records:
         r["sentiment"] = judge_sentiment(r["title"], r["desc"], words)
     strip_terms = sorted({t for k in cfg["keywords"] for t in queries_of(k)}, key=len, reverse=True)
-    assign_clusters(records, strip_terms, float(cfg.get("cluster_threshold", 0.55)))
+    assign_clusters(records, strip_terms, float(cfg.get("cluster_threshold", 0.3)))
 
     if not first_run and new_ids:
         items = pick_alert_items(records, new_ids, cfg)
