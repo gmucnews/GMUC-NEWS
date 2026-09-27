@@ -140,19 +140,55 @@ def make_id(url):
 
 
 # ---------- 수집: 네이버 ----------
+# 네이버 검색 API는 2026년 6월 개발자센터 → NAVER API HUB(네이버 클라우드)로 옮겨졌습니다.
+# 새로 발급한 API HUB 키와 예전 개발자센터 키를 모두 지원하며, 어느 쪽인지 자동으로 가려냅니다.
+
+NAVER_ENDPOINTS = {
+    "hub": {
+        "url": "https://naverapihub.apigw.ntruss.com/search/v1/news",
+        "headers": lambda cid, sec: {"X-NCP-APIGW-API-KEY-ID": cid, "X-NCP-APIGW-API-KEY": sec},
+        "label": "API HUB",
+    },
+    "legacy": {
+        "url": "https://openapi.naver.com/v1/search/news.json",
+        "headers": lambda cid, sec: {"X-Naver-Client-Id": cid, "X-Naver-Client-Secret": sec},
+        "label": "개발자센터(구)",
+    },
+}
+_naver_mode = {"picked": None}
+
+
+def naver_call(params, cfg, cid, secret):
+    """설정된 방식으로 호출. auto 면 API HUB → 구 방식 순으로 시도하고 성공한 쪽을 기억합니다."""
+    want = cfg.get("naver_api", "auto")
+    if want in NAVER_ENDPOINTS:
+        order = [want]
+    elif _naver_mode["picked"]:
+        order = [_naver_mode["picked"]]
+    else:
+        order = ["hub", "legacy"]
+    last = None
+    for mode in order:
+        ep = NAVER_ENDPOINTS[mode]
+        r = requests.get(ep["url"], params=params, headers=ep["headers"](cid, secret), timeout=15)
+        if r.status_code == 200:
+            if _naver_mode["picked"] != mode:
+                _naver_mode["picked"] = mode
+                log(f"네이버 {ep['label']} 방식으로 연결되었습니다")
+            return r
+        last = (mode, r)
+        if r.status_code not in (401, 403, 404):
+            break
+    mode, r = last
+    raise RuntimeError(f"네이버 {NAVER_ENDPOINTS[mode]['label']} {r.status_code}: {r.text[:150]}")
+
 
 def fetch_naver(query, cfg, cid, secret):
     out = []
     for page in range(cfg.get("naver_pages", 1)):
         display = min(int(cfg.get("naver_display", 100)), 100)
-        r = requests.get(
-            "https://openapi.naver.com/v1/search/news.json",
-            params={"query": query, "display": display, "start": 1 + page * display, "sort": "date"},
-            headers={"X-Naver-Client-Id": cid, "X-Naver-Client-Secret": secret},
-            timeout=15,
-        )
-        if r.status_code != 200:
-            raise RuntimeError(f"네이버 API {r.status_code}: {r.text[:150]}")
+        r = naver_call({"query": query, "display": display, "start": 1 + page * display, "sort": "date"},
+                       cfg, cid, secret)
         items = r.json().get("items", [])
         for it in items:
             link = it.get("link", "")
@@ -280,10 +316,16 @@ def queries_of(kw):
 
 
 def is_relevant(a, kw):
-    compact = (a["title"] + " " + a["desc"]).replace(" ", "")
+    text = a["title"] + " " + a["desc"]
+    compact = text.replace(" ", "")
     terms = kw.get("must_include") or queries_of(kw)
-    if kw.get("require_match", True) and not any(t.replace(" ", "") in compact for t in terms):
-        return False
+    if kw.get("require_match", True):
+        if kw.get("exact_spacing"):  # 띄어쓰기까지 똑같이 들어간 기사만
+            ok = any(t in text for t in terms)
+        else:                        # 띄어쓰기 무시
+            ok = any(t.replace(" ", "") in compact for t in terms)
+        if not ok:
+            return False
     return not any(ex.replace(" ", "") in compact for ex in kw.get("exclude", []))
 
 
@@ -497,10 +539,12 @@ def main():
 
     old = load_json(NEWS_PATH)
     first_run = old is None
+    kw_by_name = {k["name"]: k for k in cfg["keywords"]}
     db = {}
     for r in (old or {}).get("articles", []):
         r = from_json_rec(r)
-        r["keywords"] = [k for k in r["keywords"] if k in kw_names]
+        # 설정이 바뀌어도 기존 기사를 다시 걸러냄 (제외어·띄어쓰기 규칙 반영)
+        r["keywords"] = [k for k in r["keywords"] if k in kw_by_name and is_relevant(r, kw_by_name[k])]
         if r["keywords"] and r["published"] >= cutoff:
             db[r["id"]] = r
     url_idx, title_idx = build_indexes(db)
@@ -575,6 +619,8 @@ def main():
             "keywords": meta_keywords,
             "articles": articles,
         })
+    if _naver_mode["picked"]:
+        src_state["naver"]["mode"] = NAVER_ENDPOINTS[_naver_mode["picked"]]["label"]
     status["sources"] = src_state
     status["new_count"] = len(new_ids)
     status["total"] = len(articles)

@@ -4,6 +4,8 @@
     {
       "name": "구미도시공사",
       "query": "구미도시공사",
+      "must_include": ["구미도시공사", "구미 도시공사"],
+      "exact_spacing": true,
       "exclude": [],
       "alert": true
     },
@@ -21,6 +23,7 @@
     }
   ],
   "retention_days": 30,
+  "naver_api": "auto",
   "naver_display": 100,
   "naver_pages": 1,
   "daum_enabled": true,
