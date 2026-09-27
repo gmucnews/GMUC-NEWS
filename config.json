@@ -15,7 +15,7 @@
     },
     {
       "name": "구미시의회",
-      "query": "구미시의회",
+      "query": ["구미시의회", "구미시의원", "구미시 의원"],
       "exclude": [],
       "alert": true
     },
@@ -32,7 +32,7 @@
   "naver_display": 100,
   "naver_pages": 1,
   "daum_enabled": true,
-  "daum_pages": 2,
+  "daum_pages": 4,
   "alert_only_new_stories": true,
   "cluster_threshold": 0.55,
   "sentiment": {
