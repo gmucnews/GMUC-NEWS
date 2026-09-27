@@ -233,6 +233,12 @@ def parse_daum_time(text, now):
     return None
 
 
+def inner_text(el):
+    """요소의 글자만 꺼냅니다. 다음 검색이 검색어에 넣는 <b> 강조 때문에
+    단어가 쪼개지지 않도록, 태그 자리에 공백을 넣지 않고 제거합니다."""
+    return clean_text(el.decode_contents())
+
+
 def _first(el, selectors):
     for sel in selectors:
         found = el.select_one(sel)
@@ -249,7 +255,7 @@ def parse_daum_item(li, now):
         a = cands[0] if cands else None
     if not a:
         return None
-    title = clean_text(a.get_text(" "))
+    title = inner_text(a)
     if len(title) < 6:
         return None
     desc_el = _first(li, [".item-contents p", "p.conts-desc", ".conts-desc", "p.desc", ".desc"])
@@ -262,10 +268,10 @@ def parse_daum_item(li, now):
         "title": title,
         "url": href,
         "portal_url": href if "daum.net" in href else "",
-        "desc": clean_text(desc_el.get_text(" ")) if desc_el else "",
+        "desc": inner_text(desc_el) if desc_el else "",
         "published": pub or now,
         "time_exact": False,
-        "press": clean_text(press_el.get_text()) if press_el else None,
+        "press": inner_text(press_el) if press_el else None,
         "source": "daum",
     }
 
@@ -280,7 +286,7 @@ def parse_daum_html(page_html, now):
             out.append(it)
     if not out:  # 구조가 바뀐 경우를 위한 최소한의 대비책
         for a in soup.select("a[href*='v.daum.net/v/']"):
-            t = clean_text(a.get_text(" "))
+            t = inner_text(a)
             if len(t) >= 10:
                 box = a.find_parent("li") or a.parent
                 pub = parse_daum_time(box.get_text(" ", strip=True), now) if box else None
@@ -418,6 +424,10 @@ def merge(db, url_idx, title_idx, a, kw_name):
             rec["keywords"].append(kw_name)
         if a["time_exact"] and not rec["time_exact"]:
             rec["published"], rec["time_exact"] = a["published"], True
+        # 예전에 잘못 띄어 저장된 제목을 더 정확한 쪽으로 교체
+        if a["title"] != rec["title"] and norm_title(a["title"]) == norm_title(rec["title"]) \
+                and (a["source"] == "naver" or a["title"].count(" ") < rec["title"].count(" ")):
+            rec["title"] = a["title"]
         if len(a["desc"]) > len(rec["desc"]):
             rec["desc"] = a["desc"][:240]
         if a["portal_url"] and not rec.get("portal_url"):
@@ -587,8 +597,13 @@ def main():
             if is_new:
                 new_ids.add(rec["id"])
                 added += 1
-        status["keywords"][name] = {"fetched": len(fetched), "new": added}
-        log(f"{name}: 수집 {len(fetched)}건, 새 기사 {added}건")
+        kept = sum(1 for r in db.values() if name in r["keywords"])
+        status["keywords"][name] = {"fetched": len(fetched), "new": added, "kept": kept}
+        log(f"{name}: 수집 {len(fetched)}건, 새 기사 {added}건, 목록 {kept}건")
+        if fetched and kept == 0:
+            msg = f"'{name}' 키워드는 수집된 {len(fetched)}건이 모두 걸러졌습니다. config.json 의 exclude/must_include 설정을 확인하세요."
+            status.setdefault("warnings", []).append(msg)
+            log("경고:", msg)
 
     records = list(db.values())
     words = cfg.get("sentiment", {})

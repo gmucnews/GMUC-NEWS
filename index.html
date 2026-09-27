@@ -425,7 +425,9 @@ function renderStats(){
   const st = state.status;
   if (st && st.sources){
     const line = (k) => { const v = st.sources[k]; if (!v) return ''; return v.ok ? `${SRC[k]} 정상 (${v.count}건 확인)` : `<span class="bad">${SRC[k]} 수집 안 됨: ${esc(v.error)}</span>`; };
-    $('#health').innerHTML = `<h2 style="font-size:13px;margin:0 0 4px;color:var(--muted)">수집 상태</h2>${line('naver')}<br>${line('daum')}`;
+    const mode = st.sources.naver && st.sources.naver.mode ? ` — ${esc(st.sources.naver.mode)}` : '';
+    const warn = (st.warnings || []).map(w => `<div class="bad">${esc(w)}</div>`).join('');
+    $('#health').innerHTML = `<h2 style="font-size:13px;margin:0 0 4px;color:var(--muted)">수집 상태</h2>${line('naver')}${mode}<br>${line('daum')}${warn}`;
   } else $('#health').innerHTML = '';
 }
 

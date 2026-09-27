@@ -4,9 +4,7 @@
     {
       "name": "구미도시공사",
       "query": "구미도시공사",
-      "must_include": ["구미도시공사", "구미 도시공사"],
-      "exact_spacing": true,
-      "exclude": [],
+      "exclude": ["도시 공사 현장", "도시가스 공사"],
       "alert": true
     },
     {
