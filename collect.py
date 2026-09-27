@@ -561,18 +561,19 @@ def main():
 
     cid, secret = os.getenv("NAVER_CLIENT_ID"), os.getenv("NAVER_CLIENT_SECRET")
     status = {"checked_at": now.isoformat(timespec="minutes"), "sources": {}, "keywords": {}}
-    src_state = {
-        "naver": {"ok": bool(cid and secret), "count": 0,
-                  "error": "" if cid and secret else "네이버 API 키가 설정되지 않았습니다"},
-        "daum": {"ok": bool(cfg.get("daum_enabled", True)), "count": 0,
-                 "error": "" if cfg.get("daum_enabled", True) else "사용 안 함"},
-    }
+    naver_on = bool(cfg.get("naver_enabled", True)) and bool(cid and secret)
+    src_state = {}
+    if cfg.get("naver_enabled", True):
+        src_state["naver"] = {"ok": naver_on, "count": 0,
+                              "error": "" if naver_on else "네이버 API 키가 설정되지 않았습니다"}
+    if cfg.get("daum_enabled", True):
+        src_state["daum"] = {"ok": True, "count": 0, "error": ""}
     new_ids = set()
 
     for kw in cfg["keywords"]:
         name, fetched = kw["name"], []
         for q in queries_of(kw):
-            if cid and secret:
+            if naver_on:
                 try:
                     got = fetch_naver(q, cfg, cid, secret)
                     fetched += got
@@ -634,7 +635,7 @@ def main():
             "keywords": meta_keywords,
             "articles": articles,
         })
-    if _naver_mode["picked"]:
+    if _naver_mode["picked"] and "naver" in src_state:
         src_state["naver"]["mode"] = NAVER_ENDPOINTS[_naver_mode["picked"]]["label"]
     status["sources"] = src_state
     status["new_count"] = len(new_ids)

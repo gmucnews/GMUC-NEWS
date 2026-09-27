@@ -173,7 +173,7 @@ details.mstats>summary{display:none}
 <main class="wrap">
   <aside class="side" aria-label="필터와 통계">
     <div class="fg"><h2>기간</h2><div class="seg" id="fPeriod"></div></div>
-    <div class="fg"><h2>포털</h2><div class="seg" id="fSource"></div></div>
+    <div class="fg" id="gSource"><h2>포털</h2><div class="seg" id="fSource"></div></div>
     <div class="fg"><h2>논조</h2><div class="seg" id="fSent"></div></div>
     <div class="fg"><h2 id="lblPress">언론사</h2><select class="sel" id="fPress" aria-labelledby="lblPress"></select></div>
     <details class="mstats" id="mstats">
@@ -382,7 +382,11 @@ function seg(el, items, cur, attr){
 
 function renderFilters(){
   seg($('#fPeriod'), PERIODS, state.period, 'period');
-  seg($('#fSource'), [['all','전체'],['naver','네이버'],['daum','다음']], state.source, 'source');
+  const live = ['naver','daum'].filter(k => state.data.articles.some(a => a.sources.includes(k)));
+  state.multiSource = live.length > 1;
+  $('#gSource').hidden = !state.multiSource;
+  if (!state.multiSource && state.source !== 'all') state.source = 'all';
+  seg($('#fSource'), [['all','전체'], ...live.map(k => [k, SRC[k]])], state.source, 'source');
   seg($('#fSent'), [['all','전체'],['positive','긍정'],['neutral','중립'],['negative','부정']], state.sentiment, 'sent');
   const counts = {};
   byTab(state.tab).filter(inPeriod).forEach(a => counts[a.press] = (counts[a.press] || 0) + 1);
@@ -424,10 +428,15 @@ function renderStats(){
 
   const st = state.status;
   if (st && st.sources){
-    const line = (k) => { const v = st.sources[k]; if (!v) return ''; return v.ok ? `${SRC[k]} 정상 (${v.count}건 확인)` : `<span class="bad">${SRC[k]} 수집 안 됨: ${esc(v.error)}</span>`; };
-    const mode = st.sources.naver && st.sources.naver.mode ? ` — ${esc(st.sources.naver.mode)}` : '';
+    const line = (k) => {
+      const v = st.sources[k];
+      if (!v) return '';
+      if (!v.ok) return `<span class="bad">${SRC[k]} 수집 안 됨: ${esc(v.error)}</span>`;
+      return `${SRC[k]} 정상 (${v.count}건 확인)${v.mode ? ' — ' + esc(v.mode) : ''}`;
+    };
+    const lines = ['naver','daum'].map(line).filter(Boolean);
     const warn = (st.warnings || []).map(w => `<div class="bad">${esc(w)}</div>`).join('');
-    $('#health').innerHTML = `<h2 style="font-size:13px;margin:0 0 4px;color:var(--muted)">수집 상태</h2>${line('naver')}${mode}<br>${line('daum')}${warn}`;
+    $('#health').innerHTML = `<h2 style="font-size:13px;margin:0 0 4px;color:var(--muted)">수집 상태</h2>${lines.join('<br>')}${warn}`;
   } else $('#health').innerHTML = '';
 }
 
@@ -463,7 +472,7 @@ function itemHTML(g){
   const neg = all.some(x => x.sentiment === 'negative');
   const sent = neg ? 'negative' : a.sentiment;
   const fresh = all.some(isNew);
-  const srcs = [...new Set(all.flatMap(x => x.sources))];
+  const srcs = state.multiSource ? [...new Set(all.flatMap(x => x.sources))] : [];
   const open = state.open.has(a.cluster);
   const kws = state.tab === '전체' ? a.keywords.map(k => `<span class="chip kw">${esc(k)}</span>`).join('') : '';
   const rest = g.rest.length ? `<ul class="rest"${open ? '' : ' hidden'}>${g.rest.map(r =>

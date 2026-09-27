@@ -21,6 +21,7 @@
     }
   ],
   "retention_days": 30,
+  "naver_enabled": false,
   "naver_api": "auto",
   "naver_display": 100,
   "naver_pages": 1,
